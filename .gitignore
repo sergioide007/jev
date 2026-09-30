@@ -1,0 +1,12 @@
+node_modules/
+dist/
+coverage/
+
+# Never commit credentials. The SDK reads TYPESAFE_API_KEY from here.
+.env
+.env.local
+*.log
+
+.DS_Store
+.vscode/
+.idea/

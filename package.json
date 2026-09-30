@@ -1,0 +1,38 @@
+{
+  "name": "jev",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Agent control layer powered by Jev (TypeSafe AI System One models): tool gating, tool selection and loop/completion detection over a deterministic runtime.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "demo": "tsx src/cli.ts",
+    "smoke": "tsx src/smoke.ts"
+  },
+  "keywords": [
+    "jev",
+    "typesafe",
+    "system-one",
+    "agent",
+    "decision-model"
+  ],
+  "dependencies": {
+    "@typesafe-ai/sdk": "^0.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.3",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.2"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true
+  }
+}
