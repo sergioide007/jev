@@ -28,9 +28,16 @@ import {
   judgeQuestion,
   selectQuestion,
 } from "./decider/questionsets.js";
-import { JEV_MODEL_ID, THRESHOLDS, evaluateGate, evaluateLoop, evaluateSelection } from "./policy.js";
+import {
+  JEV_MODEL_ID,
+  THRESHOLDS,
+  assertValidThresholds,
+  evaluateGate,
+  evaluateLoop,
+  evaluateSelection,
+} from "./policy.js";
 import type { LoopDecision, Thresholds } from "./policy.js";
-import type { BlastRadius, StopReason, Step, ToolCall, Verdict } from "./types.js";
+import type { BlastRadius, StopReason, Step, ToolCall, ToolEffect, Verdict } from "./types.js";
 import type { ToolRegistry } from "./tools/registry.js";
 import type { Tracer } from "./trace.js";
 
@@ -65,6 +72,26 @@ export interface AgentRun {
   readonly summary: string;
   /** Every decision made, in order. */
   readonly transcript: readonly string[];
+}
+
+/**
+ * Thrown when the loop dies for a reason the policy did not decide: the decider
+ * threw (network, auth, quota) or a tool lookup failed. It carries everything
+ * the run had accumulated, so a crash mid-run still leaves a forensic trail
+ * instead of a bare stack trace.
+ *
+ * Fails closed: nothing after the failing call was executed.
+ */
+export class AgentError extends Error {
+  readonly steps: readonly Step[];
+  readonly transcript: readonly string[];
+
+  constructor(message: string, steps: readonly Step[], transcript: readonly string[], cause: unknown) {
+    super(message, { cause });
+    this.name = "AgentError";
+    this.steps = steps;
+    this.transcript = transcript;
+  }
 }
 
 /** What the gate request needs to know about the selected tool. */
@@ -179,12 +206,20 @@ async function gateCall(
     model: ctx.model,
   });
 
-  const policy = evaluateGate({
-    destructive: expectNoul(result.answers, GATE_KEYS.destructive).noul,
-    outsideScope: expectNoul(result.answers, GATE_KEYS.outsideScope).noul,
-    reversibility: expectScore(result.answers, GATE_KEYS.reversibility).score,
-    blastRadius: expectChoice<BlastRadius>(result.answers, GATE_KEYS.blastRadius).choice as BlastRadius,
-  });
+  const blast = expectChoice<BlastRadius>(result.answers, GATE_KEYS.blastRadius);
+
+  const policy = evaluateGate(
+    {
+      destructive: expectNoul(result.answers, GATE_KEYS.destructive).noul,
+      outsideScope: expectNoul(result.answers, GATE_KEYS.outsideScope).noul,
+      reversibility: expectScore(result.answers, GATE_KEYS.reversibility).score,
+      blastRadius: blast.choice as BlastRadius,
+      blastRadiusProbabilities: blast.probabilities,
+      // Declared by whoever registered the tool: a fact the model cannot argue with.
+      effect: ctx.effectOf(call.tool),
+    },
+    ctx.thresholds.gate,
+  );
 
   ctx.tracer.record({
     step: steps.length,
@@ -245,7 +280,7 @@ type LoopContext = {
   readonly model: string;
   readonly thresholds: Thresholds;
   readonly selectQuestions: NonNullable<ReturnType<typeof selectQuestion>>;
-  readonly effectOf: (tool: string) => string;
+  readonly effectOf: (tool: string) => ToolEffect;
   readonly bindArguments: ArgumentBinder;
 };
 
@@ -265,84 +300,97 @@ export async function runAgent(goal: string, options: AgentOptions): Promise<Age
     throw new Error(`tool catalogue of ${specs.length} is not selectable (allowed: 2–255)`);
   }
 
+  const thresholds: Thresholds = { ...THRESHOLDS, hardStepLimit: options.hardStepLimit ?? THRESHOLDS.hardStepLimit };
+  // A NaN or zero step limit would quietly turn the backstop off. Refuse to start.
+  assertValidThresholds(thresholds);
+
   const ctx: LoopContext = {
     decider,
     tracer,
     registry,
     model,
-    thresholds: { ...THRESHOLDS, hardStepLimit: options.hardStepLimit ?? THRESHOLDS.hardStepLimit },
+    thresholds,
     selectQuestions,
-    effectOf: (tool) => specs.find((candidate) => candidate.name === tool)?.effect ?? "read",
+    // Unknown tool: throw rather than default to "read". A fail-open default here would
+    // quietly waive the effect floor for exactly the call nobody registered.
+    effectOf: (tool) => registry.get(tool).effect,
     bindArguments: options.bindArguments ?? defaultArgumentBinder,
   };
   // The loop is unbounded on purpose: the only stop condition that always holds
   // is the hard step limit inside `evaluateLoop`, checked on every iteration.
-  for (;;) {
-    // ---- 1. select ---------------------------------------------------------
-    const selection = await selectTool(goal, steps, ctx);
-    if ("escalated" in selection) {
-      transcript.push("selection escalated: no tool stood out confidently");
-      return {
-        stopReason: "escalated",
-        steps,
-        summary: "Tool selection had no clear winner",
-        transcript,
-      };
-    }
-
-    // ---- 2. gate -----------------------------------------------------------
-    const gated = await gateCall(goal, steps, selection.call, ctx);
-
-    if (gated.verdict === "deny") {
-      const reason = gated.step.reasons.join("; ");
-      transcript.push(`step ${gated.step.index}: ${gated.call.tool} denied — ${reason}`);
-      return { stopReason: "denied", steps, summary: `Refused ${gated.call.tool}: ${reason}`, transcript };
-    }
-
-    if (gated.verdict === "ask_user") {
-      const approved = await escalation({
-        step: gated.step.index,
-        call: gated.call,
-        reasons: gated.step.reasons,
-      });
-      transcript.push(
-        `step ${gated.step.index}: ${gated.call.tool} held for approval (${gated.step.reasons.join("; ")}) → ${approved ? "approved" : "not approved"}`,
-      );
-      if (!approved) {
+  try {
+    for (;;) {
+      // ---- 1. select ---------------------------------------------------------
+      const selection = await selectTool(goal, steps, ctx);
+      if ("escalated" in selection) {
+        transcript.push("selection escalated: no tool stood out confidently");
         return {
           stopReason: "escalated",
           steps,
-          summary: `Approval denied for ${gated.call.tool}`,
+          summary: "Tool selection had no clear winner",
           transcript,
         };
       }
+
+      // ---- 2. gate -----------------------------------------------------------
+      const gated = await gateCall(goal, steps, selection.call, ctx);
+
+      if (gated.verdict === "deny") {
+        const reason = gated.step.reasons.join("; ");
+        transcript.push(`step ${gated.step.index}: ${gated.call.tool} denied — ${reason}`);
+        return { stopReason: "denied", steps, summary: `Refused ${gated.call.tool}: ${reason}`, transcript };
+      }
+
+      if (gated.verdict === "ask_user") {
+        const approved = await escalation({
+          step: gated.step.index,
+          call: gated.call,
+          reasons: gated.step.reasons,
+        });
+        transcript.push(
+          `step ${gated.step.index}: ${gated.call.tool} held for approval (${gated.step.reasons.join("; ")}) → ${approved ? "approved" : "not approved"}`,
+        );
+        if (!approved) {
+          return {
+            stopReason: "escalated",
+            steps,
+            summary: `Approval denied for ${gated.call.tool}`,
+            transcript,
+          };
+        }
+      }
+
+      // ---- execute -----------------------------------------------------------
+      const result = await registry.invoke(gated.call);
+      steps[steps.length - 1] = { ...gated.step, result };
+      transcript.push(`step ${gated.step.index}: ${gated.call.tool} → ${result.summary}`);
+
+      // ---- 3. judge ----------------------------------------------------------
+      const decision = await judgeRun(goal, steps, ctx);
+
+      if (decision.action === "finish") {
+        transcript.push(`run complete: ${decision.reason}`);
+        return {
+          stopReason: "complete",
+          steps,
+          summary: `Goal satisfied after ${steps.length} step(s)`,
+          transcript,
+        };
+      }
+
+      if (decision.action === "break") {
+        // Only the hard-limit case is a statement about our own configuration; a
+        // model-detected loop is a statement about the agent's behaviour.
+        const reason: StopReason = steps.length >= ctx.thresholds.hardStepLimit ? "step_limit" : "loop_detected";
+        transcript.push(`run stopped: ${decision.reason}`);
+        return { stopReason: reason, steps, summary: decision.reason, transcript };
+      }
     }
-
-    // ---- execute -----------------------------------------------------------
-    const result = await registry.invoke(gated.call);
-    steps[steps.length - 1] = { ...gated.step, result };
-    transcript.push(`step ${gated.step.index}: ${gated.call.tool} → ${result.summary}`);
-
-    // ---- 3. judge ----------------------------------------------------------
-    const decision = await judgeRun(goal, steps, ctx);
-
-    if (decision.action === "finish") {
-      transcript.push(`run complete: ${decision.reason}`);
-      return {
-        stopReason: "complete",
-        steps,
-        summary: `Goal satisfied after ${steps.length} step(s)`,
-        transcript,
-      };
-    }
-
-    if (decision.action === "break") {
-      // Only the hard-limit case is a statement about our own configuration; a
-      // model-detected loop is a statement about the agent's behaviour.
-      const reason: StopReason = steps.length >= ctx.thresholds.hardStepLimit ? "step_limit" : "loop_detected";
-      transcript.push(`run stopped: ${decision.reason}`);
-      return { stopReason: reason, steps, summary: decision.reason, transcript };
-    }
+  } catch (error) {
+    if (error instanceof AgentError) throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    transcript.push(`run aborted after ${steps.length} step(s): ${message}`);
+    throw new AgentError(`agent aborted after ${steps.length} step(s): ${message}`, [...steps], [...transcript], error);
   }
 }
 

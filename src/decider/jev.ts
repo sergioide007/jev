@@ -8,6 +8,7 @@
 import { TypeSafeClient, choice, noul, score } from "@typesafe-ai/sdk";
 import type { TypeSafeClientConfig } from "@typesafe-ai/sdk";
 
+import { assertQuestionSet } from "./questionsets.js";
 import type { Answer, DecideRequest, DecideResult, Decider, Question, Questions } from "./types.js";
 
 function toSdkQuestion(question: Question) {
@@ -16,7 +17,7 @@ function toSdkQuestion(question: Question) {
       return choice(question.instructions, question.criteria as Record<string, string | null>);
     case "score":
       // `ScoreCriteria` is a variadic tuple ("at least two, from zero"); the
-      // length check lives in `assertQuestionSet` before we ever get here.
+      // length check is `assertQuestionSet`, called at the top of `decide`.
       return score(question.instructions, question.criteria as [string, string, ...string[]]);
     case "noul":
       return noul(question.instructions, question.criteria ?? null);
@@ -54,12 +55,14 @@ export class JevDecider implements Decider {
     return new JevDecider(options);
   }
 
-  /** Model ids available to the account. Useful to confirm access at boot. */
-  listModels() {
-    return this.client.models;
+  /** Models available to the account. Useful to confirm access at boot. */
+  async listModels() {
+    return this.client.models.list();
   }
 
   async decide(request: DecideRequest): Promise<DecideResult> {
+    assertQuestionSet(request.questions);
+
     const { answers, model, usage } = await this.client.systemOne({
       state: request.state as string,
       questions: toSdkQuestions(request.questions) as never,

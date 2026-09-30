@@ -24,8 +24,15 @@ export type ArgumentBinder = (request: {
   readonly effect: string;
 }) => Record<string, string>;
 
-/** A term the user put in quotes: the most reliable signal available. */
-const QUOTED = /["'`]([^"'`\n]{1,120})["'`]/;
+/**
+ * A term the user put in quotes: the most reliable signal available.
+ *
+ * The opening quote must not follow a word character and the closing quote must
+ * match it and not precede one. Without that, the apostrophes in "don't" and
+ * "the user's ledger" are read as quote marks and bind garbage such as
+ * `t stop until you search for`.
+ */
+const QUOTED = /(?<!\w)(["'`])((?:(?!\1)[^\n]){1,120}?)\1(?!\w)/;
 
 /** ...or one introduced by a keyword: "the term ledger", "the word ledger". */
 const INTRODUCED = /\b(?:term|word|string|phrase|token|pattern)\s+([\w./-]{2,60})\b/i;
@@ -39,7 +46,7 @@ const PATH_LIKE = /(?:^|\s)((?:\.{0,2}\/)?[\w.-]+(?:\/[\w.-]+)*\.[A-Za-z0-9]{1,8
  */
 export function extractTerm(goal: string): string | null {
   const quoted = QUOTED.exec(goal);
-  if (quoted?.[1] !== undefined) return quoted[1].trim();
+  if (quoted?.[2] !== undefined) return quoted[2].trim();
 
   const introduced = INTRODUCED.exec(goal);
   if (introduced?.[1] !== undefined) return introduced[1].trim();

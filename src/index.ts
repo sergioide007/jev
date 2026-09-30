@@ -9,7 +9,7 @@
  *   agent.ts   the loop that wires the three together
  */
 
-export { runAgent } from "./agent.js";
+export { AgentError, runAgent } from "./agent.js";
 export type { AgentOptions, AgentRun, EscalationHandler } from "./agent.js";
 
 export { JevDecider } from "./decider/jev.js";
@@ -35,7 +35,9 @@ export {
   GATE_KEYS,
   JUDGE_KEYS,
   MAX_CHOICE_OPTIONS,
+  MAX_SCORE_LEVELS,
   SELECT_KEY,
+  assertQuestionSet,
   gateQuestion,
   judgeQuestion,
   selectQuestion,
@@ -45,6 +47,7 @@ export {
   COST_PER_MTOK_USD,
   JEV_MODEL_ID,
   THRESHOLDS,
+  assertValidThresholds,
   estimateCostUsd,
   evaluateGate,
   evaluateLoop,

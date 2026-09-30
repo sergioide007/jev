@@ -7,9 +7,9 @@
  * only be trusted against the real API and a labelled eval set.
  */
 
-import { GATE_KEYS, JUDGE_KEYS, SELECT_KEY } from "./questionsets.js";
+import { GATE_KEYS, JUDGE_KEYS, SELECT_KEY, assertQuestionSet } from "./questionsets.js";
 import { extractTerm } from "../arguments.js";
-import type { Answer, DecideRequest, DecideResult, Decider, Questions } from "./types.js";
+import type { Answer, DecideRequest, DecideResult, Decider } from "./types.js";
 import type { BlastRadius, ToolEffect, ToolSpec } from "../types.js";
 
 export type Script = Partial<Record<string, Answer>>;
@@ -182,6 +182,9 @@ export class FakeDecider implements Decider {
   async decide(request: DecideRequest): Promise<DecideResult> {
     this.calls.push(request);
 
+    // Mirror the real path: the same limits are enforced before any answer is produced.
+    assertQuestionSet(request.questions);
+
     const script = this.responder(request);
     const answers: Record<string, Answer> = {};
 
@@ -207,14 +210,5 @@ export class FakeDecider implements Decider {
   }
 }
 
-/** Assert a question set is internally valid before it costs a round trip. */
-export function assertQuestionSet(questions: Questions): void {
-  for (const [key, question] of Object.entries(questions)) {
-    if (question.type === "choice" && Object.keys(question.criteria).length < 2) {
-      throw new Error(`choice question "${key}" needs at least two options`);
-    }
-    if (question.type === "score" && question.criteria.length < 2) {
-      throw new Error(`score question "${key}" needs at least two levels`);
-    }
-  }
-}
+/** Re-exported so existing imports keep working; the implementation now lives with the questions. */
+export { assertQuestionSet };

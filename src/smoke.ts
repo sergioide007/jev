@@ -42,7 +42,7 @@ async function main(): Promise<void> {
   if (process.env["TYPESAFE_API_KEY"] === undefined) {
     console.error(
       "TYPESAFE_API_KEY is not set.\n\n" +
-        "  1. Request early access at https://console.typesafe.ai\n" +
+        "  1. Get an API key at https://console.typesafe.ai\n" +
         "  2. export TYPESAFE_API_KEY=...\n" +
         "  3. npm run smoke\n",
     );

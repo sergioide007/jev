@@ -18,6 +18,38 @@ import type { ToolSpec } from "../types.js";
 /** Ceiling documented by TypeSafe for a single Choice question. */
 export const MAX_CHOICE_OPTIONS = 255;
 
+/** Documented bounds for a Score scale: two to ten levels. */
+export const MIN_SCORE_LEVELS = 2;
+export const MAX_SCORE_LEVELS = 10;
+
+/**
+ * Validate a question set against the documented limits *before* it costs a
+ * round trip. This runs on the real path (`JevDecider.decide`) and in the test
+ * double alike, so a malformed set fails here with a readable message instead
+ * of as an opaque 422 from the API.
+ */
+export function assertQuestionSet(questions: Questions): void {
+  const keys = Object.keys(questions);
+  if (keys.length === 0) throw new Error("a request needs at least one question");
+
+  for (const [key, question] of Object.entries(questions)) {
+    if (question.type === "choice") {
+      const options = Object.keys(question.criteria).length;
+      if (options < 2) throw new Error(`choice question "${key}" needs at least two options`);
+      if (options > MAX_CHOICE_OPTIONS) {
+        throw new Error(`choice question "${key}" has ${options} options; the limit is ${MAX_CHOICE_OPTIONS}`);
+      }
+    }
+    if (question.type === "score") {
+      const levels = question.criteria.length;
+      if (levels < MIN_SCORE_LEVELS) throw new Error(`score question "${key}" needs at least two levels`);
+      if (levels > MAX_SCORE_LEVELS) {
+        throw new Error(`score question "${key}" has ${levels} levels; the limit is ${MAX_SCORE_LEVELS}`);
+      }
+    }
+  }
+}
+
 export const SELECT_KEY = "tool";
 export const GATE_KEYS = {
   destructive: "destructive",

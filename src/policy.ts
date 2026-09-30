@@ -11,7 +11,7 @@
  * labelled data before changing anything, and pin the model id when you do.
  */
 
-import type { BlastRadius, LoopAction, Verdict } from "./types.js";
+import type { BlastRadius, LoopAction, ToolEffect, Verdict } from "./types.js";
 
 export const JEV_MODEL_ID = "jev-1.13.0";
 
@@ -31,6 +31,18 @@ export type Thresholds = {
     readonly irreversibleAbove: number;
     readonly hardDelete: number;
     readonly severeBlastRadius: readonly BlastRadius[];
+    /**
+     * Tool effects a human must always approve, whatever the model concluded.
+     * `effect` is declared by the code that registers the tool, so it is a fact,
+     * not a probability: it is the floor under the model's judgement.
+     */
+    readonly alwaysAskEffects: readonly ToolEffect[];
+    /**
+     * Probability mass on severe blast radii at or above which the radius is
+     * treated as severe even when the argmax is not. A Choice returns a label,
+     * but the distribution underneath it is the actionable part.
+     */
+    readonly severeMass: number;
   };
   readonly select: { readonly minConfidence: number };
   readonly loop: { readonly complete: number; readonly looping: number; readonly progressBelow: number };
@@ -49,6 +61,10 @@ export const THRESHOLDS: Thresholds = {
     hardDelete: 0.9,
     /** Blast radii that can never execute unattended. */
     severeBlastRadius: ["system", "external"],
+    /** Deleting anything needs a person, however benign the model finds it. */
+    alwaysAskEffects: ["delete"],
+    /** Fail-closed default: 30% of the mass on system/external is enough to escalate. */
+    severeMass: 0.3,
   },
   select: {
     /** Below this the model has no clear winner; escalate rather than guess. */
@@ -72,6 +88,10 @@ export type GateSignals = {
   /** 0 trivially reversible, 1 reversible with effort, 2 irreversible. */
   reversibility: number;
   blastRadius: BlastRadius;
+  /** Full distribution behind `blastRadius`. When present, mass on severe scopes is enforced. */
+  blastRadiusProbabilities?: Readonly<Record<string, number>>;
+  /** Declared effect of the tool. When present, `alwaysAskEffects` is enforced. */
+  effect?: ToolEffect;
 };
 
 export type GateDecision = {
@@ -90,8 +110,19 @@ export type GateDecision = {
 export function evaluateGate(signals: GateSignals, thresholds = THRESHOLDS.gate): GateDecision {
   const reasons: string[] = [];
 
-  const severe = (thresholds.severeBlastRadius as readonly string[]).includes(signals.blastRadius);
+  const severeLabels = thresholds.severeBlastRadius as readonly string[];
+  const severe = severeLabels.includes(signals.blastRadius);
 
+  // The argmax can look harmless while a large share of the probability sits on
+  // a severe scope (single_record 0.45 / system 0.30 / external 0.20).
+  const severeMass =
+    signals.blastRadiusProbabilities === undefined
+      ? 0
+      : severeLabels.reduce((sum, label) => sum + (signals.blastRadiusProbabilities?.[label] ?? 0), 0);
+  const severeByMass = !severe && severeMass >= thresholds.severeMass;
+
+  // `deny` stays keyed on the argmax: it is irrevocable, so it must not fire on
+  // a diffuse distribution. Diffuse-but-worrying goes to a human instead.
   if (signals.destructive >= thresholds.hardDelete && severe) {
     return {
       verdict: "deny",
@@ -109,6 +140,16 @@ export function evaluateGate(signals: GateSignals, thresholds = THRESHOLDS.gate)
 
   if (severe) {
     reasons.push(`blast radius "${signals.blastRadius}" is not executable unattended`);
+  }
+
+  if (severeByMass) {
+    reasons.push(
+      `${severeMass.toFixed(2)} of the blast-radius probability sits on ${severeLabels.join("/")} >= ${thresholds.severeMass}: treated as severe`,
+    );
+  }
+
+  if (signals.effect !== undefined && thresholds.alwaysAskEffects.includes(signals.effect)) {
+    reasons.push(`tool effect "${signals.effect}" always requires approval, regardless of the model's estimate`);
   }
 
   if (signals.destructive > thresholds.destructive && signals.outsideScope > thresholds.outsideScope) {
@@ -142,7 +183,8 @@ export function evaluateLoop(
   stepCount: number,
   thresholds = THRESHOLDS,
 ): LoopDecision {
-  if (stepCount >= thresholds.hardStepLimit) {
+  // Written as a negated `<` so that a NaN limit fails closed (breaks) instead of never firing.
+  if (!(stepCount < thresholds.hardStepLimit)) {
     return {
       action: "break",
       reason: `deterministic backstop: step ${stepCount} reached the hard limit of ${thresholds.hardStepLimit}`,
@@ -176,6 +218,32 @@ export function evaluateSelection(confidence: number, thresholds = THRESHOLDS.se
     };
   }
   return { verdict: "allow", reasons: [] };
+}
+
+/**
+ * Reject a threshold set that would silently disable a safeguard. A NaN or
+ * non-positive step limit is the classic case: the backstop stops being one.
+ */
+export function assertValidThresholds(thresholds: Thresholds): void {
+  const limit = thresholds.hardStepLimit;
+  if (!Number.isInteger(limit) || limit < 1) {
+    throw new RangeError(`hardStepLimit must be a positive integer, got ${String(limit)}`);
+  }
+
+  const probabilities: Record<string, number> = {
+    "gate.destructive": thresholds.gate.destructive,
+    "gate.outsideScope": thresholds.gate.outsideScope,
+    "gate.hardDelete": thresholds.gate.hardDelete,
+    "gate.severeMass": thresholds.gate.severeMass,
+    "select.minConfidence": thresholds.select.minConfidence,
+    "loop.complete": thresholds.loop.complete,
+    "loop.looping": thresholds.loop.looping,
+  };
+  for (const [name, value] of Object.entries(probabilities)) {
+    if (!Number.isFinite(value) || value < 0 || value > 1) {
+      throw new RangeError(`threshold ${name} must be a number in [0, 1], got ${String(value)}`);
+    }
+  }
 }
 
 export function estimateCostUsd(usage: { input_tokens: number }): number {

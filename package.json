@@ -6,15 +6,15 @@
   "description": "Agent control layer powered by Jev (TypeSafe AI System One models): tool gating, tool selection and loop/completion detection over a deterministic runtime.",
   "license": "MIT",
   "engines": {
-    "node": ">=20"
+    "node": ">=22.9"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "demo": "tsx src/cli.ts",
-    "smoke": "tsx src/smoke.ts"
+    "demo": "tsx --env-file-if-exists=.env src/cli.ts",
+    "smoke": "tsx --env-file-if-exists=.env src/smoke.ts"
   },
   "keywords": [
     "jev",
@@ -24,7 +24,7 @@
     "decision-model"
   ],
   "dependencies": {
-    "@typesafe-ai/sdk": "^0.6.0"
+    "@typesafe-ai/sdk": "0.6.0"
   },
   "devDependencies": {
     "@types/node": "^26.6.3",

@@ -54,9 +54,9 @@ Toda decisión que le pidas a Jev tiene que caber en una de estas tres formas:
 
 Tres apuntes que separan esto de "usar un LLM con JSON mode":
 
-- **Choice** y **Score** devuelven siempre `confidence`, calibrada, además de la distribución completa de probabilidades. `choice` es solo el `argmax`; lo accionable es lo que hay debajo.
+- **Choice** y **Score** devuelven siempre `confidence` (calibrada, según TypeSafe: sus evals son propias y aún faltan benchmarks independientes), además de la distribución completa de probabilidades. `choice` es solo el `argmax`; lo accionable es lo que hay debajo.
 - **Score** es una puntuación ponderada por probabilidad, así que puede caer **entre niveles** (un 1.6 en una escala de 0 a 3 es una respuesta legítima, no un bug).
-- **Noul** no lleva campo `confidence`: la probabilidad *es* la señal. Un 0.5 significa "el modelo no tiene ni idea", no "el punto medio". Si lo que quieres es una posición en un espectro, quieres un Score.
+- **Noul** no lleva campo `confidence`: la probabilidad *es* la señal. Un valor cercano a 0.5 es la señal de máxima incertidumbre, no "el punto medio". Si lo que quieres es una posición en un espectro, quieres un Score.
 
 Y lo importante: **todas las preguntas de una request se evalúan en paralelo, en un solo viaje**. No encadenes llamadas para "partir" una decisión; eso es lo que haces cuando cada llamada cuesta segundos.
 
@@ -154,7 +154,7 @@ Dos consecuencias prácticas.
 
 **Primera: se cae la barrera de la latencia.** Con 70–500 ms, la decisión deja de ser una llamada bloqueante y pasa a ser una decisión *síncrona dentro de tu request HTTP*. Eso habilita arquitecturas que antes eran impensables por coste: gatear cada petición, cada fila de un batch, cada paso de un agente.
 
-**Segunda: cambia la economía del volumen.** A $0.042 por millón de tokens de entrada, procesar un millón de tickets cuesta alrededor de cuatro dólares. Eso no es un proyecto de R&D que necesita aprobación de presupuesto: es una factura. A esa escala la pregunta deja de ser "¿es fiable?" y pasa a ser "¿cómo no estoy ya haciendo esto?".
+**Segunda: cambia la economía del volumen.** A $0.042 por millón de tokens de entrada, procesar un millón de tickets de unos 100 tokens (≈ 100 millones de tokens) cuesta alrededor de cuatro dólares. Eso no es un proyecto de R&D que necesita aprobación de presupuesto: es una factura. A esa escala la pregunta deja de ser "¿es fiable?" y pasa a ser "¿cómo no estoy ya haciendo esto?".
 
 ---
 
@@ -166,6 +166,7 @@ Un post que solo vende no es un post de arquitecto:
 - **La latencia de 70–500 ms viene del blog de lanzamiento**, no de la documentación: no hay SLA, ni percentiles, ni regiones.
 - **La calibración depende de tu dataset.** Antes de fijar un umbral de 0.85, mide el error de calibración con tus propios datos. Es el único número que cuenta.
 - **Solo texto.** Sin imágenes, audio ni vídeo por ahora.
+- **Acceso anticipado.** El modelo se mueve: fija la versión (`jev-1.13.0`) y guarda el id que devuelve cada respuesta en tus logs.
 - **Alta cardinalidad cuesta.** Con muchas opciones en un `choice` el muestreo pasa a dos etapas y aparece latencia ocasional.
 
 ---

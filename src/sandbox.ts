@@ -6,7 +6,7 @@
  * whole point of the design: the model is never the authority on permissions.
  */
 
-import { realpath } from "node:fs/promises";
+import { lstat, realpath } from "node:fs/promises";
 import path from "node:path";
 
 export class SandboxViolation extends Error {
@@ -35,11 +35,52 @@ function assertPlausible(candidate: string): void {
   }
 }
 
+/**
+ * Resolve symlinks for the longest prefix of `target` that exists, then re-attach
+ * the part that does not.
+ *
+ * Checking only paths that exist is not enough: `link/new.txt`, where `link` is a
+ * symlink to somewhere outside the root and `new.txt` does not exist yet, passes
+ * a purely lexical check and would be created outside the sandbox by any tool
+ * that writes. A dangling symlink is refused outright for the same reason.
+ */
+async function resolveThroughExistingAncestor(target: string, original: string): Promise<string> {
+  let current = target;
+  const missing: string[] = [];
+
+  for (;;) {
+    try {
+      const real = await realpath(current);
+      return missing.length === 0 ? real : path.join(real, ...missing.reverse());
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT" && code !== "ENOTDIR") {
+        // ELOOP, EACCES, ...: cannot prove containment, so fail closed.
+        throw new SandboxViolation(`cannot resolve path safely (${code ?? "unknown error"}): ${original}`);
+      }
+
+      const info = await lstat(current).catch(() => null);
+      if (info?.isSymbolicLink()) {
+        throw new SandboxViolation(`path traverses a dangling symlink: ${original}`);
+      }
+
+      const parent = path.dirname(current);
+      if (parent === current) return target;
+      missing.push(path.basename(current));
+      current = parent;
+    }
+  }
+}
+
 export async function createSandbox(root: string): Promise<Sandbox> {
   const absoluteRoot = await realpath(path.resolve(root));
 
-  const contains = (resolved: string): boolean =>
-    resolved === absoluteRoot || resolved.startsWith(absoluteRoot + path.sep);
+  // `path.relative` instead of `startsWith(root + sep)`: the latter breaks when the
+  // root is a filesystem root ("/" + "/" is "//"), and the former needs no special case.
+  const contains = (resolved: string): boolean => {
+    const rel = path.relative(absoluteRoot, resolved);
+    return rel === "" || (rel !== ".." && !rel.startsWith(".." + path.sep) && !path.isAbsolute(rel));
+  };
 
   return {
     root: absoluteRoot,
@@ -54,16 +95,7 @@ export async function createSandbox(root: string): Promise<Sandbox> {
         throw new SandboxViolation(`path escapes the sandbox root: ${candidate}`);
       }
 
-      // Resolve symlinks when the target exists, so a link pointing outside the
-      // root cannot be used as a tunnel. A missing target is fine: callers that
-      // create paths need the lexical check above to still hold.
-      let resolved = joined;
-      try {
-        resolved = await realpath(joined);
-      } catch {
-        // Target does not exist yet; the lexical containment check stands.
-      }
-
+      const resolved = await resolveThroughExistingAncestor(joined, candidate);
       if (!contains(resolved)) {
         throw new SandboxViolation(`path resolves outside the sandbox root via a link: ${candidate}`);
       }

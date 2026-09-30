@@ -6,13 +6,15 @@
  * worth testing, and a demo where everything is safe proves nothing.
  */
 
-import { readdir, readFile, rm, stat } from "node:fs/promises";
+import { open, readdir, rm, stat } from "node:fs/promises";
 import path from "node:path";
 
 import type { Tool } from "./registry.js";
 import type { Sandbox } from "../sandbox.js";
 
 const MAX_BYTES = 64_000;
+/** Files larger than this are skipped by the crawl and reported, never read whole. */
+const MAX_SCAN_BYTES = 1_000_000;
 /** Bound the crawl: an unbounded search inside an agent loop never converges. */
 const MAX_DEPTH = 6;
 const MAX_HITS = 50;
@@ -23,6 +25,24 @@ function requireString(args: Readonly<Record<string, string>>, key: string): str
     throw new Error(`missing required argument "${key}"`);
   }
   return value;
+}
+
+/**
+ * Read at most `maxBytes` from the start of a file. `readFile(...).slice(...)`
+ * would load the entire file first, which is exactly the allocation the cap is
+ * meant to prevent.
+ */
+async function readCapped(file: string, maxBytes: number): Promise<{ text: string; size: number }> {
+  const handle = await open(file, "r");
+  try {
+    const { size } = await handle.stat();
+    const length = Math.min(size, maxBytes);
+    const buffer = Buffer.alloc(length);
+    const { bytesRead } = await handle.read(buffer, 0, length, 0);
+    return { text: buffer.toString("utf8", 0, bytesRead), size };
+  } finally {
+    await handle.close();
+  }
 }
 
 function relative(sandbox: Sandbox, target: string): string {
@@ -41,11 +61,11 @@ export function readFileTool(sandbox: Sandbox): Tool {
       const info = await stat(target);
       if (!info.isFile()) throw new Error("not a regular file");
 
-      const contents = await readFile(target, "utf8");
+      const { text } = await readCapped(target, MAX_BYTES);
       return {
         ok: true,
-        summary: `read ${info.size} bytes from ${relative(sandbox, target)}`,
-        detail: contents.slice(0, MAX_BYTES),
+        summary: `read ${Math.min(info.size, MAX_BYTES)} of ${info.size} bytes from ${relative(sandbox, target)}`,
+        detail: text,
       };
     },
   };
@@ -76,19 +96,35 @@ export function listDirTool(sandbox: Sandbox): Tool {
   };
 }
 
-/** Shared read-only walker over the sandbox tree. */
-async function walkFiles(sandbox: Sandbox, onFile: (path: string, contents: string) => void): Promise<void> {
+/**
+ * Shared read-only walker over the sandbox tree. Returns how many files were
+ * skipped for size, so a result is never silently incomplete.
+ */
+async function walkFiles(
+  sandbox: Sandbox,
+  onFile: (path: string, contents: string) => void,
+): Promise<{ skipped: number }> {
+  let skipped = 0;
   const walk = async (dir: string, depth: number): Promise<void> => {
     if (depth > MAX_DEPTH) return;
     for (const entry of await readdir(dir, { withFileTypes: true })) {
       if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
       const child = path.join(dir, entry.name);
-      if (entry.isDirectory()) await walk(child, depth + 1);
-      else if (entry.isFile()) onFile(child, await readFile(child, "utf8").catch(() => ""));
+      if (entry.isDirectory()) {
+        await walk(child, depth + 1);
+      } else if (entry.isFile()) {
+        const read = await readCapped(child, MAX_SCAN_BYTES).catch(() => null);
+        if (read === null) continue;
+        if (read.size > MAX_SCAN_BYTES) skipped += 1;
+        else onFile(child, read.text);
+      }
     }
   };
   await walk(sandbox.root, 0);
+  return { skipped };
 }
+
+const skippedNote = (skipped: number): string => (skipped > 0 ? ` (${skipped} file(s) over ${MAX_SCAN_BYTES} bytes skipped)` : "");
 
 export function searchTool(sandbox: Sandbox): Tool {
   return {
@@ -101,7 +137,7 @@ export function searchTool(sandbox: Sandbox): Tool {
       const needle = requireString(args, "pattern").toLowerCase();
       const hits: string[] = [];
 
-      await walkFiles(sandbox, (file, contents) => {
+      const { skipped } = await walkFiles(sandbox, (file, contents) => {
         if (hits.length >= MAX_HITS) return;
         contents.split("\n").forEach((line, index) => {
           if (hits.length < MAX_HITS && line.toLowerCase().includes(needle)) {
@@ -110,7 +146,7 @@ export function searchTool(sandbox: Sandbox): Tool {
         });
       });
 
-      return { ok: true, summary: `${hits.length} matches for "${needle}"`, detail: hits.join("\n") };
+      return { ok: true, summary: `${hits.length} matches for "${needle}"${skippedNote(skipped)}`, detail: hits.join("\n") };
     },
   };
 }
@@ -126,7 +162,7 @@ export function countMatchesTool(sandbox: Sandbox): Tool {
       const needle = requireString(args, "pattern").toLowerCase();
       let total = 0;
 
-      await walkFiles(sandbox, (_file, contents) => {
+      const { skipped } = await walkFiles(sandbox, (_file, contents) => {
         const haystack = contents.toLowerCase();
         let index = haystack.indexOf(needle);
         while (index !== -1) {
@@ -135,7 +171,7 @@ export function countMatchesTool(sandbox: Sandbox): Tool {
         }
       });
 
-      return { ok: true, summary: `"${needle}" occurs ${total} time(s)` };
+      return { ok: true, summary: `"${needle}" occurs ${total} time(s)${skippedNote(skipped)}` };
     },
   };
 }
